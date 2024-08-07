@@ -1,0 +1,115 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: configmap-creator
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create"]
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: namespace-webhook-sa
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: configmap-creator-binding
+subjects:
+- kind: ServiceAccount
+  name: namespace-webhook-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: configmap-creator
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: namespace-webhook
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: namespace-webhook
+  template:
+    metadata:
+      labels:
+        app: namespace-webhook
+    spec:
+      serviceAccountName: namespace-webhook-sa
+      containers:
+      - name: namespace-webhook
+        image: nggocnn/namespace-webhook:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 443
+        env:
+        - name: TLS
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/admission-webhook/tls
+          readOnly: true
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: server-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: namespace-webhook-service
+  namespace: default
+spec:
+  ports:
+  - port: 443
+    targetPort: 443
+  selector:
+    app: namespace-webhook
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: namespace-webhook-config
+  annotations:
+    cert-manager.io/inject-ca-from: default/client
+webhooks:
+- name: namespace-webhook-config.ngocnn.online
+  clientConfig:
+    service:
+      name: namespace-webhook-service
+      namespace: default
+      path: "/validate"
+      port: 443
+  rules:
+  - operations: ["CREATE", "UPDATE", "DELETE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["namespaces"]
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  failurePolicy: Ignore
