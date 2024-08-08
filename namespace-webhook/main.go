@@ -41,17 +41,16 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	namespace := corev1.Namespace{}
     oldNamespace := corev1.Namespace{}
+    err = json.Unmarshal(admissionReview.Request.OldObject.Raw, &oldNamespace)
+    if err != nil {
+        logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse old namespace")
+        http.Error(w, fmt.Sprintf("Could not parse old namespace: %v", err), http.StatusBadRequest)
+        return
+    }
+
+	namespace := corev1.Namespace{}
     switch admissionReview.Request.Operation {
-        case admissionv1.Create:
-            err := json.Unmarshal(admissionReview.Request.Object.Raw, &namespace)
-            if err != nil {
-                logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse namespace")
-                http.Error(w, fmt.Sprintf("Could not parse namespace: %v", err), http.StatusBadRequest)
-                return
-            }
-			logger.Info(fmt.Sprintf("Namespace %s created", namespace.Name))
 		case admissionv1.Update:
             err := json.Unmarshal(admissionReview.Request.Object.Raw, &namespace)
             if err != nil {
@@ -60,19 +59,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
                 return
             }
 			logger.Info(fmt.Sprintf("Namespace %s updated", namespace.Name))
-            err = json.Unmarshal(admissionReview.Request.OldObject.Raw, &oldNamespace)
-            if err != nil {
-                logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse old namespace")
-                http.Error(w, fmt.Sprintf("Could not parse old namespace: %v", err), http.StatusBadRequest)
-                return
-            }
 		case admissionv1.Delete:
-            err = json.Unmarshal(admissionReview.Request.OldObject.Raw, &oldNamespace)
-            if err != nil {
-                logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse old namespace")
-                http.Error(w, fmt.Sprintf("Could not parse old namespace: %v", err), http.StatusBadRequest)
-                return
-            }
             logger.Info(fmt.Sprintf("Namespace %s deleted", oldNamespace.Name))
 		default:
             logger.Info("Unknown operation")
@@ -88,8 +75,8 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		logger.WithFields(logrus.Fields{"error": err}).Error("failed to create clientset")
-		http.Error(w, fmt.Sprintf("Could not create clientset: %v", err), http.StatusInternalServerError)
+		logger.WithFields(logrus.Fields{"error": err}).Error("failed to create client")
+		http.Error(w, fmt.Sprintf("Could not create client: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -98,12 +85,6 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
     projectName := "test-project"
 
 	switch admissionReview.Request.Operation {
-        case admissionv1.Create:
-            if targetKey && targetName != "" && runtimeKey && runtime == "target" {
-                cronExpression := "@every 5m"
-                createVeleroSchedule(*r, dynamicClient, projectName, targetName, namespace.Name, cronExpression, logger)
-                createVeleroBackup(*r, dynamicClient,  projectName, targetName, namespace.Name, logger)
-            }  
         case admissionv1.Update:
             oldTargetName, oldTargetKey := oldNamespace.Labels["namespace.oam.dev/target"]
             oldRuntime, oldRuntimeKey := oldNamespace.Labels["usage.oam.dev/runtime"]
@@ -119,7 +100,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
             oldTargetName, oldTargetKey := oldNamespace.Labels["namespace.oam.dev/target"]
             oldRuntime, oldRuntimeKey := oldNamespace.Labels["usage.oam.dev/runtime"]
             if oldTargetKey && oldTargetName != "" && oldRuntimeKey && oldRuntime == "target" {
-                deleteVeleroSchedule(*r, dynamicClient, projectName, oldTargetName, namespace.Name, logger)
+                deleteVeleroSchedule(*r, dynamicClient, projectName, oldTargetName, oldNamespace.Name, logger)
             }
     }
 
