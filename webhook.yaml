@@ -53,8 +53,24 @@ spec:
         ports:
         - containerPort: 443
         env:
+          - name: VELERO_NAMESPACE
+            value: "velero"
           - name: CRON_EXPRESSION
-            value: "@every 5m"
+            value: "@every 10m"
+          - name: CSI_SNAPSHOT_TIMEOUT
+            value: "10m"
+          - name: STORAGE_LOCATION
+            value: "default"
+          - name: BACKUP_TTL
+            value: "720h"
+          - name: DEFAULT_VOLUMES_TO_FS_BACKUP
+            value: "true"
+          - name: BACKUP_SUFFIX
+            value: "backup"
+          - name: LOG_FORMAT
+            value: "text"
+          - name: LOG_LEVEL
+            value: ""
         livenessProbe:
           httpGet:
             path: /health

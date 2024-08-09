@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
     "time"
-	"string"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 
@@ -20,12 +20,13 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+var veleroNamespace string = "velero" // Velero Namespace
 var cronExpression string = "@every 1h" // Velero Schedule - Cron expression define when to run the Backup
 var	csiSnapshotTimeout string = "10m" // csiSnapshotTimeout specifies the time used to wait for CSI VolumeSnapshot status turns to ReadyToUse during creation, before returning error as timeout. The default value is 10 minute.
 var	storageLocation string = "default" // Where Velero store the tarball and logs
-var	ttl string = "720h0m0s" // The amount of time before backups created on this schedule are eligible for garbage collection. If not specified, a default value of 30 days will be used.
+var	backupTTL string = "720h0m0s" // The amount of time before backups created on this schedule are eligible for garbage collection. If not specified, a default value of 30 days will be used.
 var	defaultVolumesToFsBackup bool // whether pod volume file system backup should be used for all volumes by default.
-var backupSufix string = "backup" // Backup sufix
+var backupSuffix string = "backup" // Backup sufix
 var	logFormat string = "text" // Log format (text or json)
 var	logLevel string = "" // Log level (debug, info, warn, error, fatal, panic)
 
@@ -156,7 +157,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 		Resource: "schedules",
 	}
 
-	_, err := client.Resource(veleroScheduleResource).Namespace("velero").Get(r.Context(), scheduleName, metav1.GetOptions{})
+	_, err := client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Get(r.Context(), scheduleName, metav1.GetOptions{})
 	if err != nil {
         logger.Info(fmt.Sprintf("%v", err))
 	}
@@ -167,7 +168,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 			"kind": "Schedule",
 			"metadata": map[string]interface{}{
 				"name": scheduleName,
-				"namespace": "velero",
+				"namespace": veleroNamespace,
 			},
 			"spec": map[string]interface{}{
 				"schedule": cronExpression,
@@ -184,7 +185,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 	}
 
 	logger.Info(fmt.Sprintf("Creating Velero schedule %s", scheduleName))
-	_, err = client.Resource(veleroScheduleResource).Namespace("velero").Create(r.Context(), veleroSchedule, metav1.CreateOptions{})
+	_, err = client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Create(r.Context(), veleroSchedule, metav1.CreateOptions{})
 	if err != nil {
         logger.Info(fmt.Sprintf("%v", err))
 	}
@@ -206,7 +207,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 			"kind": "Backup",
 			"metadata": map[string]interface{}{
 				"name": backupName,
-				"namespace": "velero",
+				"namespace": veleroNamespace,
 			},
 			"spec": map[string]interface{}{
 				"csiSnapshotTimeout": csiSnapshotTimeout,
@@ -219,7 +220,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 	}
 
 	logger.Info(fmt.Sprintf("Creating Velero backup %s", backupName))
-	_, err := client.Resource(veleroBackupResource).Namespace("velero").Create(r.Context(), veleroBackup, metav1.CreateOptions{})
+	_, err := client.Resource(veleroBackupResource).Namespace(veleroNamespace).Create(r.Context(), veleroBackup, metav1.CreateOptions{})
 	if err != nil {
         logger.Error(fmt.Sprintf("%v", err))
 	}
@@ -235,7 +236,7 @@ func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 	}
 
 	logger.Info(fmt.Sprintf("Deleting Velero schedule %s", scheduleName))
-	err := client.Resource(veleroScheduleResource).Namespace("velero").Delete(r.Context(), scheduleName, metav1.DeleteOptions{})
+	err := client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Delete(r.Context(), scheduleName, metav1.DeleteOptions{})
 	if err != nil {
         logger.Error(fmt.Sprintf("%v", err))
 	}
@@ -275,13 +276,15 @@ func parseRequest(r http.Request) (*admissionv1.AdmissionReview, error) {
 func setEnv() {
 	logger := logrus.WithFields(logrus.Fields{})
 
-	cronExpression = os.Getenv("CRON_EXPRESSION", cronExpression)
-	
-	csiSnapshotTimeout = os.Getenv("CSI_SNAPSHOT_TIMEOUT", csiSnapshotTimeout)
+	veleroNamespace = getEnv("VELERO_NAMESPACE", veleroNamespace)
 
-	storageLocation = os.Getenv("STORAGE_LOCATION", storageLocation)
+	cronExpression = getEnv("CRON_EXPRESSION", cronExpression)
 	
-	ttl = os.Getenv("BACKUP_TTL", ttl)
+	csiSnapshotTimeout = getEnv("CSI_SNAPSHOT_TIMEOUT", csiSnapshotTimeout)
+
+	storageLocation = getEnv("STORAGE_LOCATION", storageLocation)
+	
+	backupTTL = getEnv("BACKUP_TTL", backupTTL)
 	
 	defaultVolumesToFsBackupEnv := os.Getenv("DEFAULT_VOLUMES_TO_FS_BACKUP")
 	if defaultVolumesToFsBackupEnv == "" || strings.ToLower(defaultVolumesToFsBackupEnv) == "true" {
@@ -290,19 +293,20 @@ func setEnv() {
 		defaultVolumesToFsBackup = false
 	}
 
-	backupSufix = os.Getenv("BACKUP_SUFIX", backupSufix)
+	backupSuffix = getEnv("BACKUP_SUFFIX", backupSuffix)
 
-	logFormat = os.Getenv("LOG_FORMAT", "text")
+	logFormat = getEnv("LOG_FORMAT", "text")
 
-	logLevel := os.Getenv("LOG_LEVEL")
+	logLevel := getEnv("LOG_LEVEL", "")
 
 	logger.WithFields(logrus.Fields{
+		"veleroNamespace":			veleroNamespace,
         "cronExpression":			cronExpression,
         "csiSnapshotTimeout":		csiSnapshotTimeout,
         "storageLocation":			storageLocation,
-        "backupTTL":				ttl,
+        "backupTTL":				backupTTL,
         "defaultVolumesToFsBackup":	defaultVolumesToFsBackup,
-		"backupSufix":				backupSufix,
+		"backupSuffix":				backupSuffix,
         "logFormat":				logFormat,
         "logLevel":					logLevel,
     }).Info("Set environment variables")
@@ -315,10 +319,19 @@ func setEnv() {
 
 	logrus.SetLevel(logrus.DebugLevel)
 
-	level, err := logrus.ParseLevel(logLevel)
-	if err != nil {
-		logrus.Warn("Invalid LOG_LEVEL; using default level")
-	} else {
-		logrus.SetLevel(level)
+	if logLevel != "" {
+		level, err := logrus.ParseLevel(logLevel)
+		if err != nil {
+			logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse log level")
+		}
+			logrus.SetLevel(level)
 	}
+}
+
+func getEnv(key string, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }
