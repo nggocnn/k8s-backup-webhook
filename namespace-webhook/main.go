@@ -20,31 +20,36 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-var veleroNamespace string = "velero" // Velero Namespace
-var cronExpression string = "@every 1h" // Velero Schedule - Cron expression define when to run the Backup
-var	csiSnapshotTimeout string = "10m" // csiSnapshotTimeout specifies the time used to wait for CSI VolumeSnapshot status turns to ReadyToUse during creation, before returning error as timeout. The default value is 10 minute.
-var	storageLocation string = "default" // Where Velero store the tarball and logs
-var	backupTTL string = "720h0m0s" // The amount of time before backups created on this schedule are eligible for garbage collection. If not specified, a default value of 30 days will be used.
-var	defaultVolumesToFsBackup bool // whether pod volume file system backup should be used for all volumes by default.
-var backupSuffix string = "backup" // Backup sufix
-var	logFormat string = "text" // Log format (text or json)
-var	logLevel string = "" // Log level (debug, info, warn, error, fatal, panic)
+// Default configuration values
+var veleroNamespace string = "velero"		// Velero Namespace
+var cronExpression string = "@every 1h"		// Velero Schedule - Cron expression define when to run the Backup
+var	csiSnapshotTimeout string = "10m"		// csiSnapshotTimeout specifies the time used to wait for CSI VolumeSnapshot status turns to ReadyToUse during creation, before returning error as timeout. The default value is 10 minute.
+var	storageLocation string = "default"		// Where Velero store the tarball and logs
+var	backupTTL string = "720h0m0s"			// The amount of time before backups created on this schedule are eligible for garbage collection. If not specified, a default value of 30 days will be used.
+var	defaultVolumesToFsBackup bool = true	// whether pod volume file system backup should be used for all volumes by default.
+var backupSuffix string = "backup"			// Backup sufix
+var	logFormat string = "text"				// Log format (text or json)
+var	logLevel string = ""					// Log level (debug, info, warn, error, fatal, panic)
 
 func main() {
-	setEnv()
+	setEnv()  // Get and set environment variables
 
+	// Set up HTTP handlers for the validation and health endpoints
 	http.HandleFunc("/validate", ServerNamespaceBackup)
 	http.HandleFunc("/health", ServerHealth)
 
+	// Start the HTTPS server with TLS certificates
 	cert := "/etc/admission-webhook/tls/tls.crt"
 	key := "/etc/admission-webhook/tls/tls.key"
 	logrus.Print("Listening on port 443...")
 	logrus.Fatal(http.ListenAndServeTLS(":443", cert, key, nil))
 }
 
+// ServerNamespaceBackup handles the admission webhook requests (create/update/delete namespaces) to create/delete Velero schedules and backups.
 func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 	logger := logrus.WithFields(logrus.Fields{"uri": r.RequestURI})
 
+	// Parse the admission request	
 	admissionReview, err := parseRequest(*r)
 	if err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to parse request")
@@ -55,6 +60,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
     oldNamespace := corev1.Namespace{}
 	namespace := corev1.Namespace{}
 	
+	// Handle the operations: Create, Update, Delete
     switch admissionReview.Request.Operation {
 		case admissionv1.Create:
 			err := json.Unmarshal(admissionReview.Request.Object.Raw, &namespace)
@@ -91,6 +97,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 			return
 	}
 
+	// Get in-cluster Kubernetes configuration
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("failed to get in-cluster config")
@@ -98,6 +105,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create a dynamic Kubernetes client
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("failed to create client")
@@ -105,6 +113,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract labels to determine whether to create, update, or delete Kubevela target
     targetName, targetKey := namespace.Labels["namespace.oam.dev/target"]
 	runtime, runtimeKey := namespace.Labels["usage.oam.dev/runtime"]
 	oldTargetName, oldTargetKey := oldNamespace.Labels["namespace.oam.dev/target"]
@@ -112,11 +121,13 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 
 	switch admissionReview.Request.Operation {
 		case admissionv1.Create:
+			// Create Velero schedule and backup if the namespace is restored
 			if targetKey && targetName != "" && runtimeKey && runtime == "target" {
 				createVeleroSchedule(*r, dynamicClient, namespace.Name, logger)
 				createVeleroBackup(*r, dynamicClient,  namespace.Name, logger)
 			}
         case admissionv1.Update:
+			// Create Velero schedule and backup if the namespace is updated to a target, or delete if no longer a target
             if targetKey && targetName != "" && runtimeKey && runtime == "target" && (!oldTargetKey || oldTargetName == "" || !oldRuntimeKey || oldRuntime == "") {
                 createVeleroSchedule(*r, dynamicClient, namespace.Name, logger)
                 createVeleroBackup(*r, dynamicClient,  namespace.Name, logger)
@@ -125,11 +136,13 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
             }
             
         case admissionv1.Delete:
+			// Delete Velero schedule if the namespace is deleted and was a target
             if oldTargetKey && oldTargetName != "" && oldRuntimeKey && oldRuntime == "target" {
                 deleteVeleroSchedule(*r, dynamicClient, oldNamespace.Name, logger)
             }
     }
-
+	
+	// Respond to the admission request
     response := admissionv1.AdmissionReview{
 		Response: &admissionv1.AdmissionResponse{
 			Allowed: true,
@@ -137,6 +150,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	// Marshal the response into JSON and write it to the response writer
 	respBytes, err := json.Marshal(response)
 	if err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to marshal response")
@@ -148,6 +162,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBytes)
 }
 
+// createVeleroSchedule creates a Velero schedule for backing up the given namespace.
 func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
 	scheduleName := fmt.Sprintf("%s-backup", namespaceName)
     
@@ -157,11 +172,13 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 		Resource: "schedules",
 	}
 
+	// Check if the schedule already exists
 	_, err := client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Get(r.Context(), scheduleName, metav1.GetOptions{})
 	if err != nil {
         logger.Info(fmt.Sprintf("%v", err))
 	}
 
+	// Define the Velero schedule object
 	veleroSchedule := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "velero.io/v1",
@@ -184,6 +201,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 		},
 	}
 
+	// Create the Velero schedule
 	logger.Info(fmt.Sprintf("Creating Velero schedule %s", scheduleName))
 	_, err = client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Create(r.Context(), veleroSchedule, metav1.CreateOptions{})
 	if err != nil {
@@ -191,6 +209,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 	}
 }
 
+// createVeleroBackup creates an instant Velero backup for the given namespace.
 func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
 	scheduleName := fmt.Sprintf("%s-backup", namespaceName)
     backupName := fmt.Sprintf("%s-%s", scheduleName, time.Now().Format("20060102150405"))
@@ -201,6 +220,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 		Resource: "backups",
 	}
 
+	// Define the Velero backup object
 	veleroBackup := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "velero.io/v1",
@@ -219,6 +239,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 		},
 	}
 
+	// Create the Velero backup
 	logger.Info(fmt.Sprintf("Creating Velero backup %s", backupName))
 	_, err := client.Resource(veleroBackupResource).Namespace(veleroNamespace).Create(r.Context(), veleroBackup, metav1.CreateOptions{})
 	if err != nil {
@@ -226,6 +247,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 	}
 }
 
+// deleteVeleroSchedule deletes a Velero schedule associated with the given namespace.
 func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
     scheduleName := fmt.Sprintf("%s-backup", namespaceName)
 
@@ -235,6 +257,7 @@ func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 		Resource: "schedules",
 	}
 
+	// Attempt to delete the Velero schedule
 	logger.Info(fmt.Sprintf("Deleting Velero schedule %s", scheduleName))
 	err := client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Delete(r.Context(), scheduleName, metav1.DeleteOptions{})
 	if err != nil {
@@ -242,12 +265,14 @@ func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 	}
 }
 
+// ServerHealth returns a 200 OK response to indicate that the webhook server is healthy.
 func ServerHealth(w http.ResponseWriter, r *http.Request) {
-	logrus.WithFields(logrus.Fields{"uri": r.RequestURI}).Debug("healthy")
+	logrus.WithFields(logrus.Fields{"uri": r.RequestURI}).Debug("Healthy")
 	w.WriteHeader(http.StatusOK)
     w.Write([]byte("ok"))
 }
 
+// parseRequest parses an admission webhook request into an AdmissionReview object.
 func parseRequest(r http.Request) (*admissionv1.AdmissionReview, error) {
     if r.Header.Get("Content-Type") != "application/json" {
 		return nil, fmt.Errorf("Content-Type: %q should be %q", r.Header.Get("Content-Type"), "application/json")
@@ -273,9 +298,11 @@ func parseRequest(r http.Request) (*admissionv1.AdmissionReview, error) {
 	return &a, nil
 }
 
+// setEnv sets environment variables based on the values provided in the running environment.
 func setEnv() {
 	logger := logrus.WithFields(logrus.Fields{})
 
+	// Load environment variables and assign to global variables
 	veleroNamespace = getEnv("VELERO_NAMESPACE", veleroNamespace)
 
 	cronExpression = getEnv("CRON_EXPRESSION", cronExpression)
