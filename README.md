@@ -1,156 +1,189 @@
-# k8s-mutating-webhook — Namespace Velero Scheduler Webhook
+# Velero Backup Webhook
 
-This repository contains a Kubernetes mutating/validating webhook that automatically creates Velero schedules and instant backups when Namespaces with specific labels are created or updated. The webhook is implemented in Go and intended to run inside the cluster as an HTTPS server behind Kubernetes admission webhooks.
+A Kubernetes admission webhook that automatically manages Velero backup resources for namespaces matching target labels.
 
-## Repository layout
+## Overview
 
-- `namespace-webhook/`
-  - `main.go` — webhook implementation (HTTP TLS server, `/validate` and `/health` endpoints).
-  - `Dockerfile` — container image build for the webhook.
-  - `go.mod` / `go.sum` — Go module files.
-- `webhook-service.yaml` — Kubernetes Service / Admission configuration (deployment/Service/ValidatingWebhookConfiguration or MutatingWebhookConfiguration — review file for details).
-- `webhook-cert-manager.yaml` — cert-manager resources (Issuer/Certificate/Secrets) used to provision TLS certs for the webhook.
+This webhook listens for namespace lifecycle events (`CREATE`, `UPDATE`, `DELETE`) and performs Velero operations:
 
-> Note: The repository assumes the webhook runs in-cluster and uses the in-cluster kubeconfig to create Velero resources.
+- Create a Velero `Schedule`.
+- Trigger an immediate Velero `Backup`.
+- Delete the Velero `Schedule` when namespace is no longer a target or is deleted.
 
-## High level behavior
+This gives you policy-driven, label-based backup automation without requiring manual schedule management per namespace.
 
-- Listens on port 443 (HTTPS) and expects TLS cert/key mounted at:
-  - `/etc/admission-webhook/tls/tls.crt`
-  - `/etc/admission-webhook/tls/tls.key`
+## How It Works
 
-- Endpoints:
-  - `POST /validate` — handles AdmissionReview requests for Namespace create/update/delete.
-  - `GET /health` — simple health check returning 200 OK "ok".
+1. Kubernetes API server sends admission requests to `POST /validate`.
+2. Webhook parses the namespace object and checks labels.
+3. If labels match target criteria, webhook calls Kubernetes API (in-cluster auth) to create Velero resources.
+4. Webhook always returns `Allowed: true` admission response.
 
-- When a Namespace has these labels:
-  - `namespace.oam.dev/target: <name>`
-  - `usage.oam.dev/runtime: target`
+Health endpoint:
 
-  the webhook will create a Velero Schedule and an instant Backup for that Namespace in the configured Velero namespace.
+- `GET /health` returns `200 OK`.
 
-## Configurable environment variables
+## Target Label Criteria
 
-The webhook reads these environment variables (defaults shown):
+A namespace is treated as a backup target when both conditions are true:
 
-- `VELERO_NAMESPACE` (default: `velero`) — Velero namespace where schedules/backups are created.
-- `CRON_EXPRESSION` (default: `@every 1h`) — schedule cron expression.
-- `CSI_SNAPSHOT_TIMEOUT` (default: `10m`) — CSI snapshot timeout used in Velero spec.
-- `STORAGE_LOCATION` (default: `default`) — Velero storageLocation.
-- `BACKUP_TTL` (default: `720h0m0s`) — TTL for backups created by the webhook.
-- `DEFAULT_VOLUMES_TO_FS_BACKUP` (default: `true`) — whether to use filesystem backup by default for volumes.
-- `BACKUP_SUFFIX` (default: `backup`) — suffix used to name backups/schedules.
-- `LOG_FORMAT` (default: `text`) — `json` or `text`.
-- `LOG_LEVEL` (default: `info`) — logging level.
+- `namespace.oam.dev/target` exists and is non-empty.
+- `usage.oam.dev/runtime=target`.
 
-## Prerequisites
+## Event Behavior
 
-- Kubernetes cluster (v1.25+ recommended to match client-go used here).
-- kubectl configured for the target cluster.
-- Docker (or another container builder) to build the image.
-- `cert-manager` installed in the cluster if you want automatic certificate issuance (the repo includes `webhook-cert-manager.yaml` as an example).
-- Velero installed in the cluster if you want Velero schedules/backups to land somewhere.
+- `CREATE`
+  - If target labels match: create `Schedule`, then create immediate `Backup`.
+- `UPDATE`
+  - If transitions into target: create `Schedule` and immediate `Backup`.
+  - If transitions out of target: delete `Schedule`.
+- `DELETE`
+  - If old namespace matched target: delete `Schedule`.
 
-## Build (locally)
+## Naming Convention
 
-From repository root you can build the Go binary:
+Resource names use `BACKUP_SUFFIX` (default `backup`):
 
-```bash
-cd namespace-webhook
-# Build binary
-go build -o ../bin/namespace-webhook ./...
-# or just build the package
-go build ./...
-```
+- Schedule: `<namespace>-<backup_suffix>`
+- Backup: `<namespace>-<backup_suffix>-<timestamp>`
 
-Or build the container image (example using Docker):
+Example with namespace `payments` and default suffix:
 
-```bash
-# from repo root
-docker build -t <your-registry>/namespace-webhook:latest -f namespace-webhook/Dockerfile namespace-webhook
-# push if needed
-docker push <your-registry>/namespace-webhook:latest
-```
+- Schedule: `payments-backup`
+- Backup: `payments-backup-20260222091530`
 
-Notes: The `Dockerfile` context is `namespace-webhook/` so that `main.go` and `go.mod` are correctly available to the build.
+## Repository Layout
 
-## Run locally (development)
+- `velero-backup-webhook/main.go` - webhook server and admission logic.
+- `velero-backup-webhook/Dockerfile` - hardened container image build.
+- `velero-backup-webhook/go.mod`, `velero-backup-webhook/go.sum` - Go module files.
+- `webhook-service.yaml` - RBAC, ServiceAccount, Deployment, Service, `MutatingWebhookConfiguration`.
+- `webhook-cert-manager.yaml` - cert-manager issuers/certificates used for TLS.
 
-The binary expects TLS certs at `/etc/admission-webhook/tls/tls.crt` and `/etc/admission-webhook/tls/tls.key` and binds to port 443. For local testing you can:
+## Configuration
 
-1. Generate a self-signed certificate and place it somewhere you control (example using openssl):
+Environment variables:
+
+- `VELERO_NAMESPACE` (default: `velero`)
+- `CRON_EXPRESSION` (default: `@every 1h`)
+- `CSI_SNAPSHOT_TIMEOUT` (default: `10m`)
+- `STORAGE_LOCATION` (default: `default`)
+- `BACKUP_TTL` (default: `720h0m0s`)
+- `DEFAULT_VOLUMES_TO_FS_BACKUP` (default: `true`)
+- `BACKUP_SUFFIX` (default: `backup`)
+- `LOG_FORMAT` (default: `text`, valid: `text|json`)
+- `LOG_LEVEL` (default: `info`)
+
+## Build
+
+Build image from repository root:
 
 ```bash
-mkdir -p /tmp/admission-webhook/tls
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -subj "/CN=namespace-webhook.default.svc" \
-  -keyout /tmp/admission-webhook/tls/tls.key \
-  -out /tmp/admission-webhook/tls/tls.crt
+docker build -t <registry>/velero-backup-webhook:latest -f velero-backup-webhook/Dockerfile velero-backup-webhook
 ```
 
-2. Run the binary with the certs mounted or symlinked to `/etc/admission-webhook/tls/` (requires root to bind 443):
+Build binary locally:
 
 ```bash
-sudo mkdir -p /etc/admission-webhook/tls
-sudo cp /tmp/admission-webhook/tls/tls.* /etc/admission-webhook/tls/
-# run the server (requires appropriate kube context if attempting to hit cluster APIs)
-sudo ./bin/namespace-webhook
+cd velero-backup-webhook
+go build -o ../bin/velero-backup-webhook .
 ```
 
-Alternatively, run in Docker and mount the certs and use a host network or port mapping.
+## Deployment
 
-## Deploy to Kubernetes
-
-1. Ensure the image is built and pushed to a registry accessible by the cluster.
-2. Apply or customize `webhook-service.yaml` and `webhook-cert-manager.yaml` to create the necessary Service, Deployment (or Pod), Secret, and webhook configuration. Example:
+1. Build and push image.
+2. Update image in `webhook-service.yaml` (`nggocnn/velero-backup-webhook:latest`).
+3. Apply cert-manager resources:
 
 ```bash
 kubectl apply -f webhook-cert-manager.yaml
+```
+
+4. Apply webhook resources:
+
+```bash
 kubectl apply -f webhook-service.yaml
 ```
 
-3. Confirm that the cert-manager (or manual certificate creation) has produced the TLS secret and that the webhook Service/Deployment pods are healthy.
+5. Verify resources:
 
-4. The webhook uses a `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` (check `webhook-service.yaml`) that points to the service and expects the server certificate to be signed by the CA used in the webhook configuration. If you use cert-manager, make sure cert-manager updates the CABundle in the webhook config or uses the recommended K8s approach for automatic patching.
+```bash
+kubectl -n default get sa velero-backup-webhook-sa
+kubectl -n default get deploy velero-backup-webhook
+kubectl -n default get svc velero-backup-webhook-service
+kubectl get mutatingwebhookconfigurations velero-backup-webhook-config
+kubectl -n default get secret velero-backup-webhook-cert
+```
 
-## Testing the webhook behavior
+## TLS and Certificates
 
-Create a namespace with labels that trigger the webhook (replace values as appropriate):
+- Webhook reads cert files from:
+  - `/etc/admission-webhook/tls/tls.crt`
+  - `/etc/admission-webhook/tls/tls.key`
+- `webhook-cert-manager.yaml` creates:
+  - Certificate: `velero-backup-webhook-server`
+  - Secret: `velero-backup-webhook-cert`
+- Deployment mounts the same secret at `/etc/admission-webhook/tls`.
+- CA bundle injection is configured with:
+  - `cert-manager.io/inject-ca-from: default/velero-backup-webhook-server`
+
+## Security Posture
+
+Current baseline hardening:
+
+- Distroless runtime image, non-root user (`UID/GID 65532`).
+- Read-only root filesystem in pod security context.
+- All Linux capabilities dropped except `NET_BIND_SERVICE` (bind to 443).
+- Runtime seccomp profile set to `RuntimeDefault`.
+- Resource requests/limits set in deployment.
+- Go module verification in Docker build (`go mod verify`).
+
+## Validate End-to-End
+
+Create target namespace:
 
 ```yaml
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: example-target-ns
+  name: example-target
   labels:
     namespace.oam.dev/target: my-target
     usage.oam.dev/runtime: target
 ```
 
-Apply it:
+Apply and verify:
 
 ```bash
-kubectl apply -f - <<EOF
-<the-namespace-yaml-above>
-EOF
+kubectl apply -f namespace.yaml
+kubectl -n velero get schedules
+kubectl -n velero get backups
+kubectl -n default logs deploy/velero-backup-webhook
 ```
 
-Then inspect Velero resources (in `VELERO_NAMESPACE`) for a schedule or backup created for `example-target-ns`:
+Update namespace to remove target behavior:
 
 ```bash
-kubectl get schedules -n $VELERO_NAMESPACE
-kubectl get backups -n $VELERO_NAMESPACE
+kubectl label ns example-target usage.oam.dev/runtime-
+kubectl -n velero get schedules
 ```
 
-Also watch the webhook logs to see the admission events.
+## Known Limitations / Operational Notes
+
+- Side effects happen synchronously during admission handling.
+  - Impact: Velero/Kubernetes API latency can increase admission latency.
+- Admission response is always `Allowed: true`.
+  - Impact: webhook does not reject namespace operations on business logic.
+- Webhook uses in-cluster auth and requires correct RBAC + Velero CRDs installed.
 
 ## Troubleshooting
 
-- If the webhook calls fail with TLS errors, confirm the service cert is valid and the CA bundle in the webhook configuration matches the issuer.
-- If the webhook cannot contact the API server, confirm RBAC and in-cluster config (when running in-cluster `rest.InClusterConfig()` is used).
-- Logs are written using logrus; adjust `LOG_LEVEL` and `LOG_FORMAT` to get more details.
-
-## Security notes
-
-- The webhook runs with in-cluster privileges and creates Velero resources—be careful with RBAC scope.
-- Use cert-manager or a secure CA to provision TLS certificates, avoid using long-lived self-signed certs in production.
+- TLS handshake/certificate errors:
+  - Check `velero-backup-webhook-cert` secret and webhook CA injection annotation.
+- Webhook timeouts:
+  - Check pod logs and Kubernetes API connectivity from pod.
+- No Velero resources created:
+  - Verify namespace labels and `VELERO_NAMESPACE`.
+  - Ensure Velero CRDs exist (`schedules.velero.io`, `backups.velero.io`).
+- RBAC errors in logs:
+  - Verify `velero-backup-webhook-role` and binding to `velero-backup-webhook-sa`.
