@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
@@ -170,7 +171,7 @@ func ServerNamespaceBackup(w http.ResponseWriter, r *http.Request) {
 
 // createVeleroSchedule creates a Velero schedule for backing up the given namespace.
 func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
-	scheduleName := fmt.Sprintf("%s-backup", namespaceName)
+	scheduleName := fmt.Sprintf("%s-%s", namespaceName, backupSuffix)
 
 	veleroScheduleResource := schema.GroupVersionResource{
 		Group:    "velero.io",
@@ -180,8 +181,9 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 
 	// Check if the schedule already exists
 	_, err := client.Resource(veleroScheduleResource).Namespace(veleroNamespace).Get(r.Context(), scheduleName, metav1.GetOptions{})
-	if err != nil {
-		logger.Info(fmt.Sprintf("%v", err))
+	if err == nil {
+		logger.Info(fmt.Sprintf("Velero schedule %s already exists", scheduleName))
+		return
 	}
 
 	// Define the Velero schedule object
@@ -219,7 +221,7 @@ func createVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 
 // createVeleroBackup creates an instant Velero backup for the given namespace.
 func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
-	scheduleName := fmt.Sprintf("%s-backup", namespaceName)
+	scheduleName := fmt.Sprintf("%s-%s", namespaceName, backupSuffix)
 	backupName := fmt.Sprintf("%s-%s", scheduleName, time.Now().Format("20060102150405"))
 
 	veleroBackupResource := schema.GroupVersionResource{
@@ -259,7 +261,7 @@ func createVeleroBackup(r http.Request, client dynamic.Interface, namespaceName 
 
 // deleteVeleroSchedule deletes a Velero schedule associated with the given namespace.
 func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceName string, logger *logrus.Entry) {
-	scheduleName := fmt.Sprintf("%s-backup", namespaceName)
+	scheduleName := fmt.Sprintf("%s-%s", namespaceName, backupSuffix)
 	veleroScheduleResource := schema.GroupVersionResource{
 		Group:    "velero.io",
 		Version:  "v1",
@@ -278,8 +280,17 @@ func deleteVeleroSchedule(r http.Request, client dynamic.Interface, namespaceNam
 
 // parseRequest parses the incoming admission webhook request into an AdmissionReview object.
 func parseRequest(r http.Request) (*admissionv1.AdmissionReview, error) {
-	if r.Header.Get("Content-Type") != "application/json" {
-		return nil, fmt.Errorf("Content-Type: %q should be %q", r.Header.Get("Content-Type"), "application/json")
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		return nil, fmt.Errorf("Content-Type header is required")
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Content-Type: %q", contentType)
+	}
+	if mediaType != "application/json" {
+		return nil, fmt.Errorf("Content-Type: %q should be %q", contentType, "application/json")
 	}
 
 	bodybuf := new(bytes.Buffer)
@@ -328,7 +339,7 @@ func setEnv() {
 
 	logFormat = getEnv("LOG_FORMAT", "text")
 
-	logLevel = getEnv("LOG_LEVEL", "")
+	logLevel = getEnv("LOG_LEVEL", logLevel)
 
 	logger.WithFields(logrus.Fields{
 		"veleroNamespace":          veleroNamespace,
@@ -348,7 +359,7 @@ func setEnv() {
 		logrus.SetFormatter(&logrus.TextFormatter{})
 	}
 
-	logrus.SetLevel(logrus.DebugLevel)
+	logrus.SetLevel(logrus.InfoLevel)
 
 	if logLevel != "" {
 		level, err := logrus.ParseLevel(logLevel)

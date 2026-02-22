@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: backup-creator
+  name: velero-backup-webhook-role
 rules:
 - apiGroups: ["velero.io"]
   resources: ["backups", "schedules"]
@@ -12,46 +12,54 @@ rules:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: namespace-webhook-sa
+  name: velero-backup-webhook-sa
   namespace: default
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: backup-creator-binding
+  name: velero-backup-webhook-binding
 subjects:
 - kind: ServiceAccount
-  name: namespace-webhook-sa
+  name: velero-backup-webhook-sa
   namespace: default
 roleRef:
   kind: ClusterRole
-  name: backup-creator
+  name: velero-backup-webhook-role
   apiGroup: rbac.authorization.k8s.io
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: namespace-webhook
+  name: velero-backup-webhook
   namespace: default
+  labels:
+    app: velero-backup-webhook
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
-      app: namespace-webhook
+      app: velero-backup-webhook
   template:
     metadata:
       labels:
-        app: namespace-webhook
+        app: velero-backup-webhook
     spec:
-      serviceAccountName: namespace-webhook-sa
+      serviceAccountName: velero-backup-webhook-sa
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-      - name: namespace-webhook
-        image: nggocnn/namespace-webhook:latest
+      - name: velero-backup-webhook
+        image: nggocnn/velero-backup-webhook:latest
         imagePullPolicy: Always
         ports:
-        - containerPort: 443
+        - name: https
+          containerPort: 443
+          protocol: TCP
         env:
           - name: VELERO_NAMESPACE
             value: "velero"
@@ -71,6 +79,14 @@ spec:
             value: "text"
           - name: LOG_LEVEL
             value: ""
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add: ["NET_BIND_SERVICE"]
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
         livenessProbe:
           httpGet:
             path: /health
@@ -78,6 +94,7 @@ spec:
             scheme: HTTPS
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 3
         readinessProbe:
           httpGet:
             path: /health
@@ -85,39 +102,50 @@ spec:
             scheme: HTTPS
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
         volumeMounts:
-        - name: webhook-server-cert
+        - name: webhook-cert
           mountPath: /etc/admission-webhook/tls
           readOnly: true
       volumes:
-      - name: webhook-server-cert
+      - name: webhook-cert
         secret:
-          secretName: webhook-server-cert
+          secretName: velero-backup-webhook-cert
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: namespace-webhook-service
+  name: velero-backup-webhook-service
   namespace: default
 spec:
+  type: ClusterIP
   ports:
-  - port: 443
+  - name: https
+    port: 443
+    protocol: TCP
     targetPort: 443
   selector:
-    app: namespace-webhook
+    app: velero-backup-webhook
 
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: namespace-webhook-config
+  name: velero-backup-webhook-config
   annotations:
-    cert-manager.io/inject-ca-from: default/server
+    cert-manager.io/inject-ca-from: default/velero-backup-webhook-server
 webhooks:
-- name: namespace-webhook-config.webhook.demo
+- name: velero-backup-webhook.webhook.velero.io
   clientConfig:
     service:
-      name: namespace-webhook-service
+      name: velero-backup-webhook-service
       namespace: default
       path: "/validate"
       port: 443
@@ -129,3 +157,5 @@ webhooks:
   admissionReviewVersions: ["v1"]
   sideEffects: None
   failurePolicy: Fail
+  matchPolicy: Equivalent
+  timeoutSeconds: 10

@@ -1,4 +1,4 @@
-module namespace-webhook
+module velero-backup-webhook
 
 go 1.22.5
 

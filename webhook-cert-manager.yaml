@@ -36,16 +36,18 @@ spec:
 kind: Certificate
 apiVersion: cert-manager.io/v1
 metadata:
-  name: server
+  name: velero-backup-webhook-server
+  namespace: default
 spec:
   issuerRef:
     name: ca-root
     kind: ClusterIssuer
-  secretName: server-cert
+  secretName: velero-backup-webhook-cert
   duration: 2160h
   renewBefore: 360h
   dnsNames:
-    - namespace-webhook-service.default.svc
+    - velero-backup-webhook-service.default.svc
+    - velero-backup-webhook-service.default.svc.cluster.local
   isCA: false
   privateKey:
     algorithm: RSA
